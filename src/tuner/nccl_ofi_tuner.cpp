@@ -93,6 +93,9 @@ static ncclResult_t nccl_ofi_tuner_init(size_t nRanks, size_t nNodes, ncclDebugL
 		return ncclInternalError;
 	}
 
+	ctx->nRanks = nRanks;
+	ctx->nNodes = nNodes;
+
 	/*
 	 * Choose "Region" over "Model" when both are supported.
 	 * TUNER_TYPE env variable is ignored if the forced tuner type is not
@@ -188,14 +191,14 @@ static ncclResult_t nccl_ofi_tuner_init_v6(void** ctx, uint64_t commId, size_t n
 					    ncclNvlDomainInfo_v6_t* nvlDomainInfo,
 					    ncclTunerConstants_v6_t* constants)
 {
-	if (getenv("NCCL_ALGO") || getenv("NCCL_PROTO")) {
-		NCCL_OFI_INFO(NCCL_INIT | NCCL_TUNING, "The tuner plugin can not be loaded when "
-				"explicitly choosing an algorithm or protocol "
-				"with NCCL_ALGO/NCCL_PROTO. "
-				"Defaulting to internal tuner.");
-		*ctx = nullptr;
-		return ncclSuccess;
-	}
+	// if (getenv("NCCL_ALGO") || getenv("NCCL_PROTO")) {
+	// 	NCCL_OFI_INFO(NCCL_INIT | NCCL_TUNING, "The tuner plugin can not be loaded when "
+	// 			"explicitly choosing an algorithm or protocol "
+	// 			"with NCCL_ALGO/NCCL_PROTO. "
+	// 			"Defaulting to internal tuner.");
+	// 	*ctx = nullptr;
+	// 	return ncclSuccess;
+	// }
 	return nccl_ofi_tuner_init(nRanks, nNodes, logFunction, ctx);
 }
 
@@ -223,11 +226,81 @@ static ncclResult_t nccl_ofi_tuner_finalize(void *context)
 	return nccl_ofi_tuner_destroy(context);
 }
 
+static ncclResult_t nccl_ofi_tuner_get_chunk_size(void *context, ncclFunc_t collType, size_t nBytes,
+						   int algo, int proto, int nChannels, size_t *chunkSize)
+{
+	nccl_ofi_tuner_context_t *ctx = (nccl_ofi_tuner_context_t *)context;
+	if (ctx == nullptr) {
+		return ncclSuccess;
+	}
+
+	if (collType == ncclFuncAllReduce && algo == NCCL_ALGO_TREE && proto == NCCL_PROTO_LL128) {
+		size_t nRanks = ctx->nRanks;
+		size_t nNodes = ctx->nNodes;
+
+		/* Only tune for 0x7 topology (nRanks == nNodes) */
+		if (nRanks != nNodes) {
+			return ncclSuccess;
+		}
+
+		/*
+		 * nBytes here is the per-channel portion. NCCL calls getChunkSize
+		 * with nChannels=1 after splitting work across channels.
+		 * To recover the total message size for the lookup table,
+		 * multiply by the total channel count. Hardcode as 4 for now.
+		 */
+		size_t messageSize = nBytes * 4;
+
+		/*
+		 * Chunk size tuning table for AllReduce Tree/LL128 0x7.
+		 * Derived from empirical data for nNodes 4-32, message sizes 1M-128M.
+		 * The threshold where chunk size transitions from 144000 to 288000
+		 * varies by nNodes.
+		 */
+		size_t tuned;
+		if (messageSize < 1048576) {
+			return ncclSuccess;
+		} else if (messageSize <= 1048576) {
+			tuned = 34560;
+		} else if (messageSize <= 2097152) {
+			tuned = 71040;
+		} else if (nNodes <= 4 && messageSize <= 8388608) {
+			tuned = 144000;
+		} else if (nNodes <= 4) {
+			tuned = 288000;
+		} else if (nNodes <= 8 && messageSize <= 33554432) {
+			tuned = 144000;
+		} else if (nNodes <= 8) {
+			tuned = 288000;
+		} else if (nNodes <= 16 && messageSize <= 33554432) {
+			/* nNodes 16: 4M stays at 71040, 8M-32M at 144000 */
+			tuned = (messageSize <= 4194304) ? 71040 : 144000;
+		} else if (nNodes <= 16) {
+			tuned = 288000;
+		} else if (messageSize <= 4194304) {
+			/* nNodes 32+: 4M stays at 71040 */
+			tuned = 71040;
+		} else if (messageSize <= 67108864) {
+			tuned = 144000;
+		} else {
+			tuned = 288000;
+		}
+
+		NCCL_OFI_INFO(NCCL_TUNING,
+			"getChunkSize: AllReduce Tree/LL128 nBytes=%zu messageSize=%zu nNodes=%zu chunkSize=%zu -> %zu",
+			nBytes, messageSize, nNodes, *chunkSize, tuned);
+
+		*chunkSize = tuned;
+	}
+
+	return ncclSuccess;
+}
+
 extern "C" const ncclTuner_v6_t ncclTunerPlugin_v6 = {.name = "nccl_ofi_tuner",
 					   .init = nccl_ofi_tuner_init_v6,
 					   .getCollInfo = nccl_ofi_tuner_get_coll_info_v6,
 					   .finalize = nccl_ofi_tuner_finalize,
-					   .getChunkSize = NULL};
+					   .getChunkSize = nccl_ofi_tuner_get_chunk_size};
 
 /* **** V2 **** */
 static ncclResult_t nccl_ofi_tuner_get_coll_info_v2(

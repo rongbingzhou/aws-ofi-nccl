@@ -29,6 +29,10 @@ struct nccl_ofi_tuner_context {
 	/* pointer to tuner type ("Region" or "Model") specific context data */
 	void *type_ctx;
 
+	/* communicator dimensions */
+	size_t nRanks;
+	size_t nNodes;
+
 	/*
 	 * tuner type ("Region" or "Model") specific functions
 	 */
