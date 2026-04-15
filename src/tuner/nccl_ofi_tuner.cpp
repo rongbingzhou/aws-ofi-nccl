@@ -243,54 +243,28 @@ static ncclResult_t nccl_ofi_tuner_get_chunk_size(void *context, ncclFunc_t coll
 			return ncclSuccess;
 		}
 
-		/*
-		 * nBytes here is the per-channel portion. NCCL calls getChunkSize
-		 * with nChannels=1 after splitting work across channels.
-		 * To recover the total message size for the lookup table,
-		 * multiply by the total channel count. Hardcode as 4 for now.
-		 */
-		size_t messageSize = nBytes * 4;
+		// AllReduce 0x7 Tree LL128 chunk size tuning (aws-ofi-nccl, P5en)
+		size_t nstepsLL128 = 1 + log2i(nNodes);
 
-		/*
-		 * Chunk size tuning table for AllReduce Tree/LL128 0x7.
-		 * Derived from empirical data for nNodes 4-32, message sizes 1M-128M.
-		 * The threshold where chunk size transitions from 144000 to 288000
-		 * varies by nNodes.
-		 */
-		size_t tuned;
-		if (messageSize < 1048576) {
-			return ncclSuccess;
-		} else if (messageSize <= 1048576) {
-			tuned = 34560;
-		} else if (messageSize <= 2097152) {
-			tuned = 71040;
-		} else if (nNodes <= 4 && messageSize <= 8388608) {
-			tuned = 144000;
-		} else if (nNodes <= 4) {
-			tuned = 288000;
-		} else if (nNodes <= 8 && messageSize <= 33554432) {
-			tuned = 144000;
-		} else if (nNodes <= 8) {
-			tuned = 288000;
-		} else if (nNodes <= 16 && messageSize <= 33554432) {
-			/* nNodes 16: 4M stays at 71040, 8M-32M at 144000 */
-			tuned = (messageSize <= 4194304) ? 71040 : 144000;
-		} else if (nNodes <= 16) {
-			tuned = 288000;
-		} else if (messageSize <= 4194304) {
-			/* nNodes 32+: 4M stays at 71040 */
-			tuned = 71040;
-		} else if (messageSize <= 67108864) {
-			tuned = 144000;
-		} else {
-			tuned = 288000;
-		}
+		size_t tunedChunkSize = 288000; // maxChunkSize
+
+		// Step 1: reduce from 288000 toward 144000 (tree depth² × 2)
+		while (nBytes / tunedChunkSize < 2 * nstepsLL128 * nstepsLL128 && tunedChunkSize > 144000)
+			tunedChunkSize /= 2;
+
+		// Step 2: reduce from 144000 to 71040 (1.5 × tree depth)
+		if (tunedChunkSize >= 144000 && nBytes / tunedChunkSize < 1.5 * nstepsLL128)
+			tunedChunkSize = 71040;
+
+		// Step 3: reduce from 71040 toward 17280 (tree depth + 1)
+		while (nBytes / tunedChunkSize < nstepsLL128 + 1 && tunedChunkSize > 17280)
+			tunedChunkSize /= 2;
 
 		NCCL_OFI_INFO(NCCL_TUNING,
-			"getChunkSize: AllReduce Tree/LL128 nBytes=%zu messageSize=%zu nNodes=%zu chunkSize=%zu -> %zu",
-			nBytes, messageSize, nNodes, *chunkSize, tuned);
+			"getChunkSize: AllReduce Tree/LL128 nBytes=%zu nNodes=%zu chunkSize=%zu -> %zu",
+			nBytes, nNodes, *chunkSize, tunedChunkSize);
 
-		*chunkSize = tuned;
+		*chunkSize = tunedChunkSize;
 	}
 
 	return ncclSuccess;
