@@ -4,6 +4,7 @@
 
 #include "config.h"
 
+#include <algorithm>
 #include <cassert>
 #include <errno.h>
 #include <pthread.h>
@@ -265,6 +266,43 @@ static ncclResult_t nccl_ofi_tuner_get_chunk_size(void *context, ncclFunc_t coll
 			nBytes, nNodes, *chunkSize, tunedChunkSize);
 
 		*chunkSize = tunedChunkSize;
+	}
+
+	if (collType == ncclFuncAllGather && algo == NCCL_ALGO_PAT && proto == NCCL_PROTO_SIMPLE) {
+		int nRanks = (int)ctx->nRanks;
+		int nNodes = (int)ctx->nNodes;
+
+		/* Only tune for 0x7 topology (nRanks == nNodes) */
+		if (nRanks != nNodes) {
+			return ncclSuccess;
+		}
+
+		// AllGather 0x7 PAT Simple chunk size tuning (aws-ofi-nccl, P5en)
+		// Optimized for 16N/32N accuracy: 16N uses same chunk sizes as 32N from 512K–64M
+		int satChunkSize = nNodes >= 16 ? 524288 : 1048576;
+		size_t T1 = nNodes >= 16 ? 32 : std::min(nNodes, 8) + 1;
+		size_t T2 = std::min(nNodes, 16);
+		size_t T3 = std::min(nNodes, 8);
+
+		int tunedChunkSize = satChunkSize;
+
+		// Step 1: cap — halve from saturation ceiling at the transition zone
+		while (tunedChunkSize * T1 > nBytes && tunedChunkSize > satChunkSize / 2)
+			tunedChunkSize /= 2;
+
+		// Step 2: mid — halve through the mid-range chunk sizes (down to 64K)
+		while (tunedChunkSize * T2 > nBytes && tunedChunkSize > 65536)
+			tunedChunkSize /= 2;
+
+		// Step 3: low — halve through the smallest chunk sizes (down to 32K)
+		while (tunedChunkSize * T3 > nBytes && tunedChunkSize > 32768)
+			tunedChunkSize /= 2;
+
+		NCCL_OFI_INFO(NCCL_TUNING,
+			"getChunkSize: AllReduce Tree/LL128 nBytes=%zu nNodes=%d chunkSize=%zu -> %d",
+			nBytes, nNodes, *chunkSize, tunedChunkSize);
+
+		*chunkSize = (size_t)tunedChunkSize;
 	}
 
 	return ncclSuccess;
