@@ -249,16 +249,16 @@ static ncclResult_t nccl_ofi_tuner_get_chunk_size(void *context, ncclFunc_t coll
 
 		size_t tunedChunkSize = 288000; // maxChunkSize
 
-		// Step 1: reduce from 288000 toward 144000 (tree depth² × 2)
-		while (nBytes / tunedChunkSize < 2 * nstepsLL128 * nstepsLL128 && tunedChunkSize > 144000)
+		// Step 1: 288000 → 144000 (threshold: 2 × nsteps²)
+		if (nBytes / tunedChunkSize < 2 * nstepsLL128 * nstepsLL128)
 			tunedChunkSize /= 2;
 
-		// Step 2: reduce from 144000 to 71040 (1.5 × tree depth)
-		if (tunedChunkSize >= 144000 && nBytes / tunedChunkSize < 1.5 * nstepsLL128)
-			tunedChunkSize = 71040;
+		// Step 2: 144000 → 72000 (threshold: 1.5 × nsteps)
+		if (nBytes / tunedChunkSize < 1.5 * nstepsLL128)
+			tunedChunkSize /= 2;
 
-		// Step 3: reduce from 71040 toward 17280 (tree depth + 1)
-		while (nBytes / tunedChunkSize < nstepsLL128 + 1 && tunedChunkSize > 17280)
+		// Step 3: 72000 → 36000 → 18000 (threshold: nsteps + 1)
+		while (nBytes / tunedChunkSize < nstepsLL128 + 1 && tunedChunkSize > 18000)
 			tunedChunkSize /= 2;
 
 		NCCL_OFI_INFO(NCCL_TUNING,
@@ -299,7 +299,7 @@ static ncclResult_t nccl_ofi_tuner_get_chunk_size(void *context, ncclFunc_t coll
 			tunedChunkSize /= 2;
 
 		NCCL_OFI_INFO(NCCL_TUNING,
-			"getChunkSize: AllReduce Tree/LL128 nBytes=%zu nNodes=%d chunkSize=%zu -> %d",
+			"getChunkSize: AllGather PAT/Simple nBytes=%zu nNodes=%d chunkSize=%zu -> %d",
 			nBytes, nNodes, *chunkSize, tunedChunkSize);
 
 		*chunkSize = (size_t)tunedChunkSize;
