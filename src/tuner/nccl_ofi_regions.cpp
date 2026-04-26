@@ -504,30 +504,36 @@ static ncclResult_t region_init_internal_p5en(nccl_ofi_tuner_region_context_t *r
 				 .vertices = {{0, 2}, {65536, 2}, {65536, 64}, {65536, TUNER_MAX_RANKS}}},
 				{.algorithm = NCCL_ALGO_TREE,
 				 .protocol = NCCL_PROTO_LL128,
-				 .num_vertices = 7,
+				 .num_vertices = 11,
 				 .vertices = {{65536, TUNER_MAX_RANKS},
 							  {65536, 64},
 							  {65536, 2},
 							  {262144, 2},
-							  {524288, 8},
+							  {1048576, 4},
+							  {4194304, 8},
+							  {16777216, 16},
+							  {33554432, 32},
+							  {1048576, 32},
 							  {1048576, 96},
 							  extended_tree_ll128}},
 				{.algorithm = NCCL_ALGO_TREE,
 				 .protocol = NCCL_PROTO_SIMPLE,
-				 .num_vertices = 7,
+				 .num_vertices = 6,
 				 .vertices = {extended_tree_ll128,
 							  {1048576, 96},
-							  {524288, 8},
-							  {262144, 2},
-							  {8388608, 32},
+							  {1048577, 32},
+							  {33554431, 32},
 							  {33554432, 128},
 							  extended_tree_simple}},
 				{.algorithm = NCCL_ALGO_RING,
 				 .protocol = NCCL_PROTO_LL128,
-				 .num_vertices = 8,
+				 .num_vertices = 11,
 				 .vertices = {extended_tree_simple,
 							  {33554432, 128},
-							  {8388608, 32},
+							  {33554433, 32},
+							  {16777217, 16},
+							  {4194305, 8},
+							  {1048577, 4},
 							  {262144, 2},
 							  {6291456, 2},
 							  {50331648, 16},
@@ -2143,6 +2149,49 @@ ncclResult_t region_get_coll_info_internal_v3(nccl_ofi_tuner_context_t *ctx,
 	NCCL_OFI_INFO(NCCL_TUNING, "Setting nChannels to %d at nBytes=%ld.", *nChannels, nBytes);
 exit:
 	return ret;
+}
+
+static size_t chunkSizeTuningTreeLL128(size_t nBytes, int log2_nnodes)
+{
+	size_t nsteps = 1 + log2_nnodes;
+	size_t tunedChunkSize = 288000;
+
+	if (nBytes / tunedChunkSize < 2 * nsteps * nsteps)
+		tunedChunkSize /= 2;
+
+	if (nBytes / tunedChunkSize < (size_t)(1.5 * nsteps))
+		tunedChunkSize /= 2;
+
+	while (nBytes / tunedChunkSize < nsteps + 1 && tunedChunkSize > 18000)
+		tunedChunkSize /= 2;
+
+	return tunedChunkSize;
+}
+
+ncclResult_t region_get_chunk_size_internal(nccl_ofi_tuner_context_t *ctx,
+					    ncclFunc_t collType,
+					    size_t nBytes,
+					    int algo,
+					    int proto,
+					    int nChannels,
+					    size_t *chunkSize)
+{
+	nccl_ofi_tuner_region_context_t *region_ctx = (nccl_ofi_tuner_region_context_t *)ctx->type_ctx;
+	if (region_ctx == nullptr) {
+		return ncclSuccess;
+	}
+
+	/* Chunk size tuning for 1-rank-per-node (nNodes == nRanks) */
+	if (region_ctx->dims.num_nodes == region_ctx->dims.num_ranks) {
+		if (collType == ncclFuncAllReduce && algo == NCCL_ALGO_TREE &&
+		    proto == NCCL_PROTO_LL128) {
+			if (region_ctx->platform == NCCL_OFI_TUNER_P5EN) {
+				*chunkSize = chunkSizeTuningTreeLL128(nBytes, region_ctx->log2_nnodes);
+			}
+		}
+	}
+
+	return ncclSuccess;
 }
 
 ncclResult_t region_destroy_internal(nccl_ofi_tuner_context_t *ctx)
