@@ -4,6 +4,7 @@
 
 #include "config.h"
 
+#include <algorithm>
 #include <cassert>
 #include <cstring>
 #include <math.h>
@@ -566,10 +567,12 @@ static ncclResult_t region_init_internal_p5en(nccl_ofi_tuner_region_context_t *r
 			const nccl_ofi_tuner_region_t regions[] = {
 				{.algorithm = NCCL_ALGO_PAT,
 				 .protocol = NCCL_PROTO_SIMPLE,
-				 .num_vertices = 10,
+				 .num_vertices = 12,
 				 .vertices = {{0, 2},
 							  {65536, 2},
 							  {1048576, 2},
+							  {8388608, 8},
+							  {16777216, 16},
 							  {16777216, 32},
 							  {50331648, 64},
 							  {117440512, 128},
@@ -579,11 +582,13 @@ static ncclResult_t region_init_internal_p5en(nccl_ofi_tuner_region_context_t *r
 							  {0, TUNER_MAX_RANKS}}},
 				{.algorithm = NCCL_ALGO_RING,
 				 .protocol = NCCL_PROTO_LL128,
-				 .num_vertices = 9,
+				 .num_vertices = 11,
 				 .vertices = {extended_pat_simple,
 							  {117440512, 128},
 							  {50331648, 64},
 							  {16777216, 32},
+							  {16777217, 16},
+							  {8388609, 8},
 							  {1048576, 2},
 							  {4194304, 2},
 							  {50331648, 16},
@@ -2151,6 +2156,30 @@ exit:
 	return ret;
 }
 
+static size_t chunkSizeTuningAllGatherPatSimple(size_t nBytes, size_t nNodes)
+{
+	size_t satChunkSize = nNodes >= 16 ? 524288 : 1048576;
+	size_t T1 = nNodes >= 16 ? 32 : std::min(nNodes, (size_t)8) + 1;
+	size_t T2 = std::min(nNodes, (size_t)16);
+	size_t T3 = std::min(nNodes, (size_t)8);
+
+	size_t tunedChunkSize = satChunkSize;
+
+	/* Step 1: cap — halve from saturation ceiling at the transition zone */
+	while (nBytes / tunedChunkSize < T1 && tunedChunkSize > satChunkSize / 2)
+		tunedChunkSize /= 2;
+
+	/* Step 2: mid — halve through the mid-range chunk sizes (down to 64K) */
+	while (nBytes / tunedChunkSize < T2 && tunedChunkSize > 65536)
+		tunedChunkSize /= 2;
+
+	/* Step 3: low — halve through the smallest chunk sizes (down to 32K) */
+	while (nBytes / tunedChunkSize < T3 && tunedChunkSize > 32768)
+		tunedChunkSize /= 2;
+
+	return tunedChunkSize;
+}
+
 static size_t chunkSizeTuningTreeLL128(size_t nBytes, int log2_nnodes)
 {
 	size_t nsteps = 1 + log2_nnodes;
@@ -2187,6 +2216,12 @@ ncclResult_t region_get_chunk_size_internal(nccl_ofi_tuner_context_t *ctx,
 		    proto == NCCL_PROTO_LL128) {
 			if (region_ctx->platform == NCCL_OFI_TUNER_P5EN) {
 				*chunkSize = chunkSizeTuningTreeLL128(nBytes, region_ctx->log2_nnodes);
+			}
+		}
+		if (collType == ncclFuncAllGather && algo == NCCL_ALGO_PAT &&
+		    proto == NCCL_PROTO_SIMPLE) {
+			if (region_ctx->platform == NCCL_OFI_TUNER_P5EN) {
+				*chunkSize = chunkSizeTuningAllGatherPatSimple(nBytes, region_ctx->dims.num_nodes);
 			}
 		}
 	}
